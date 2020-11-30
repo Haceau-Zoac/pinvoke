@@ -96,7 +96,9 @@ namespace Win32.CodeGen
                 }
                 else
                 {
-                    if (!generator.TryGenerateExternMethod(name) && !generator.TryGenerateType(name))
+                    if (!generator.TryGenerateExternMethod(name) &&
+                        !generator.TryGenerateType(name) &&
+                        !generator.TryGenerateConstant(name))
                     {
                         context.ReportDiagnostic(Diagnostic.Create(NoMatchingMethodOrType, location, name));
                     }

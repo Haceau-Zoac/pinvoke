@@ -189,6 +189,10 @@ namespace Win32.CodeGen
         /// </summary>
         private readonly Dictionary<TypeDefinitionHandle, MemberDeclarationSyntax> types = new Dictionary<TypeDefinitionHandle, MemberDeclarationSyntax>();
 
+        private readonly Dictionary<string, FieldDefinitionHandle> fieldsByName = new Dictionary<string, FieldDefinitionHandle>(StringComparer.Ordinal);
+
+        private readonly Dictionary<FieldDefinitionHandle, MemberDeclarationSyntax> fieldsToSyntax = new Dictionary<FieldDefinitionHandle, MemberDeclarationSyntax>();
+
         private readonly List<ClassDeclarationSyntax> safeHandleTypes = new List<ClassDeclarationSyntax>();
 
         /// <summary>
@@ -256,6 +260,17 @@ namespace Win32.CodeGen
                     this.typesByName.Add(name, typeDefinitionHandle);
                 }
             }
+
+            foreach (FieldDefinitionHandle fieldDefHandle in this.Apis.GetFields())
+            {
+                FieldDefinition fieldDef = this.mr.GetFieldDefinition(fieldDefHandle);
+                const FieldAttributes expectedFlags = FieldAttributes.Literal | FieldAttributes.Static | FieldAttributes.Public;
+                if ((fieldDef.Attributes & expectedFlags) == expectedFlags)
+                {
+                    string name = this.mr.GetString(fieldDef.Name);
+                    this.fieldsByName.Add(name, fieldDefHandle);
+                }
+            }
         }
 
         internal TypeDefinition Apis { get; }
@@ -288,7 +303,8 @@ namespace Win32.CodeGen
                         .AddMembers(this.MembersByClass.SelectMany(kv => kv).ToArray()),
                 }
                 .Concat(this.safeHandleTypes)
-                .Concat(this.types.Values);
+                .Concat(this.types.Values)
+                .Concat(new MemberDeclarationSyntax[] { this.CreateConstantDefiningClass() });
 
         private IEnumerable<IGrouping<string, MemberDeclarationSyntax>> MembersByClass =>
             from entry in this.modulesAndMembers
@@ -309,6 +325,8 @@ namespace Win32.CodeGen
             // Also generate all structs/enum types too, even if not referenced by a method,
             // since some methods use `void*` types and require structs at runtime.
             this.GenerateAllInteropTypes(cancellationToken);
+
+            this.GenerateAllConstants(cancellationToken);
         }
 
         /// <summary>
@@ -322,6 +340,16 @@ namespace Win32.CodeGen
                 cancellationToken.ThrowIfCancellationRequested();
 
                 this.GenerateExternMethod(methodHandle);
+            }
+        }
+
+        public void GenerateAllConstants(CancellationToken cancellationToken)
+        {
+            foreach (FieldDefinitionHandle fieldDefHandle in this.Apis.GetFields())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                this.GenerateConstant(fieldDefHandle);
             }
         }
 
@@ -379,6 +407,17 @@ namespace Win32.CodeGen
             if (this.typesByName.TryGetValue(name, out TypeDefinitionHandle typeDefHandle))
             {
                 this.GenerateInteropType(typeDefHandle);
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TryGenerateConstant(string name)
+        {
+            if (this.fieldsByName.TryGetValue(name, out FieldDefinitionHandle fieldDefHandle))
+            {
+                this.GenerateConstant(fieldDefHandle);
                 return true;
             }
 
@@ -589,6 +628,16 @@ namespace Win32.CodeGen
             {
                 this.types.Add(typeDefHandle, typeDeclaration);
             }
+        }
+
+        internal void GenerateConstant(FieldDefinitionHandle fieldDefHandle)
+        {
+            if (this.fieldsToSyntax.ContainsKey(fieldDefHandle))
+            {
+                return;
+            }
+
+            this.fieldsToSyntax.Add(fieldDefHandle, this.CreateField(fieldDefHandle));
         }
 
         private static T AddApiDocumentation<T>(string api, T memberDeclaration)
@@ -1214,6 +1263,24 @@ namespace Win32.CodeGen
             {
                 throw new Exception("Failed to generate " + this.mr.GetString(typeDef.Name), ex);
             }
+        }
+
+        private FieldDeclarationSyntax CreateField(FieldDefinitionHandle fieldDefHandle)
+        {
+            var fieldDef = this.mr.GetFieldDefinition(fieldDefHandle);
+            string name = this.mr.GetString(fieldDef.Name);
+            TypeSyntax fieldType = fieldDef.DecodeSignature(this.signatureTypeProvider, null);
+            Constant constant = this.mr.GetConstant(fieldDef.GetDefaultValue());
+            return FieldDeclaration(VariableDeclaration(fieldType).AddVariables(
+                VariableDeclarator(name).WithInitializer(EqualsValueClause(this.ToExpressionSyntax(constant)))))
+                .WithModifiers(TokenList(Token(this.Visibility), Token(SyntaxKind.ConstKeyword)));
+        }
+
+        private ClassDeclarationSyntax CreateConstantDefiningClass()
+        {
+            return ClassDeclaration("Constants")
+                .AddMembers(this.fieldsToSyntax.Values.ToArray())
+                .WithModifiers(TokenList(Token(this.Visibility), Token(SyntaxKind.StaticKeyword), Token(SyntaxKind.PartialKeyword)));
         }
 
         /// <summary>
@@ -2227,7 +2294,7 @@ namespace Win32.CodeGen
                 ConstantTypeCode.UInt64 => LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(blobReader.ReadUInt64())),
                 ConstantTypeCode.Single => LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(blobReader.ReadSingle())),
                 ConstantTypeCode.Double => LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(blobReader.ReadDouble())),
-                ConstantTypeCode.String => blobReader.ReadSerializedString() is string value ? LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(value)) : LiteralExpression(SyntaxKind.NullLiteralExpression),
+                ConstantTypeCode.String => blobReader.ReadConstant(constant.TypeCode) is string value ? LiteralExpression(SyntaxKind.StringLiteralExpression, Literal(value)) : LiteralExpression(SyntaxKind.NullLiteralExpression),
                 _ => throw new NotSupportedException("ConstantTypeCode not supported: " + constant.TypeCode),
             };
         }
